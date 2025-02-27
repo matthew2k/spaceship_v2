@@ -101,7 +101,7 @@ def convert_pred_sin_cos_to_xywhr(pred_params):
 
 def main():
     
-    NUM_EPOCHS = 15
+    NUM_EPOCHS = 30
     BATCH_SIZE = 64
     STEPS_PER_EPOCH = 500
     VAL_SAMPLES = 100
@@ -168,6 +168,9 @@ def main():
 
         print(f"[Epoch {epoch+1}/{NUM_EPOCHS}] "
             f"Train Loss: {avg_train_loss:.4f} | Val IoU: {mean_iou:.4f}")
+        
+    torch.save(model.state_dict(), "model_yaw.pt")
+    print("Training complete. Model saved to model_yaw.pt")
 
 if __name__ == "__main__":
     main()
