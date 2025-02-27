@@ -119,6 +119,9 @@ def make_data(
 
     return img, label
 
+# write a function that returns the iou score of two boxes
+# the boxes are defined by the parameters (x, y, yaw, x size, y size)
+# the iou score is defined as the area of the intersection divided by the area of the union 
 
 def score_iou(ypred: np.ndarray, ytrue: np.ndarray) -> Optional[float]:
 
