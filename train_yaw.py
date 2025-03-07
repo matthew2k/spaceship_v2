@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import wandb
 
 from helpers import make_data, score_iou
 
@@ -105,14 +106,32 @@ def main():
     BATCH_SIZE = 64
     STEPS_PER_EPOCH = 500
     VAL_SAMPLES = 100
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SpaceshipDetector6(image_size=200, base_filters=8)
+    model = SpaceshipDetector6(image_size=200, base_filters=16)
     model.to(device)
+    total_params = sum(p.numel() for p in model.parameters())
+    print("Total parameters:", total_params)
 
+    # Initialize wandb
+    wandb.init(
+        project="spaceship-detection",
+        config={
+            "architecture": "SpaceshipDetector6",
+            "learning_rate": 1e-3,
+            "epochs": NUM_EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "steps_per_epoch": STEPS_PER_EPOCH,
+            "base_filters": 16,
+            "val_samples": VAL_SAMPLES
+        }
+    )
+    wandb.config.update({"total_parameters": total_params})
+    # wandb.log(model)
     loss_fn = OrientationLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Watch the model in wandb
+    wandb.watch(model)
 
     for epoch in range(NUM_EPOCHS):
         model.train()
@@ -166,11 +185,23 @@ def main():
 
         mean_iou = np.mean(iou_scores) if len(iou_scores) > 0 else float('nan')
 
+        # Log metrics to wandb
+        wandb.log({
+            "epoch": epoch + 1,
+            "train_loss": avg_train_loss,
+            "val_iou": mean_iou,
+        })
+
         print(f"[Epoch {epoch+1}/{NUM_EPOCHS}] "
             f"Train Loss: {avg_train_loss:.4f} | Val IoU: {mean_iou:.4f}")
         
+    # Save model both locally and to wandb
     torch.save(model.state_dict(), "model_yaw.pt")
+    wandb.save("model_yaw.pt")
     print("Training complete. Model saved to model_yaw.pt")
+    
+    # Close wandb run
+    wandb.finish()
 
 if __name__ == "__main__":
     main()

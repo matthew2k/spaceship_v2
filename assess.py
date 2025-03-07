@@ -3,6 +3,7 @@ import numpy as np
 
 from helpers import make_data, score_iou
 from train_2 import SpaceshipDetector  # or wherever your model class is defined
+from train_yaw import SpaceshipDetector6 , convert_pred_sin_cos_to_xywhr# or wherever your model class is defined
 
 
 def evaluate_model(model_path="model.pt", num_samples=100):
@@ -12,18 +13,18 @@ def evaluate_model(model_path="model.pt", num_samples=100):
     """
     # 1. Load the trained model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SpaceshipDetector(image_size=200, base_filters=8)
+    model = SpaceshipDetector6(image_size=200, base_filters=16)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
 
     iou_scores = []
     
-    for _ in range(num_samples):
+    for i in range(num_samples):
         # 2. Generate a random sample
         #    The default make_data has has_spaceship=None => 80% likely ship
-        img, label = make_data(has_spaceship=None)
-        
+        img, label = make_data(has_spaceship=True)
+        # print(i)
         # Convert to tensor [1, 1, H, W]
         img_tensor = torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0).to(device)
         
@@ -33,6 +34,12 @@ def evaluate_model(model_path="model.pt", num_samples=100):
         pred = pred.squeeze(0).cpu().numpy()  # shape: (5,)
         
         # 4. Compute IoU
+            #"""
+            # pred_params: [x, y, sin_yaw, cos_yaw, w, h]
+            # returns: [x, y, yaw, w, h]
+            # """
+        print(f"sin_yaw: {pred[2]:.2f}, cos_yaw: {pred[3]:.2f}")
+        pred = convert_pred_sin_cos_to_xywhr(pred)
         iou = score_iou(pred, label)
         
         # score_iou returns None for true negative (both no ship).
@@ -50,4 +57,4 @@ def evaluate_model(model_path="model.pt", num_samples=100):
 
 
 if __name__ == "__main__":
-    evaluate_model(model_path="model.pt", num_samples=1000)
+    evaluate_model(model_path="model_yaw.pt", num_samples=1000)
