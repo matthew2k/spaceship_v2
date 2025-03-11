@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import wandb
+import sys
 
 from helpers import make_data, score_iou
 
@@ -100,108 +101,123 @@ def convert_pred_sin_cos_to_xywhr(pred_params):
     yaw = np.arctan2(sin_yaw, cos_yaw)
     return np.array([x, y, yaw, w, h])
 
-def main():
-    
-    NUM_EPOCHS = 30
-    BATCH_SIZE = 64
-    STEPS_PER_EPOCH = 500
-    VAL_SAMPLES = 100
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SpaceshipDetector6(image_size=200, base_filters=16)
-    model.to(device)
-    total_params = sum(p.numel() for p in model.parameters())
-    print("Total parameters:", total_params)
+def get_lr_scheduler(optimizer, config):
+    if config.lr_schedule == "step":
+        return optim.lr_scheduler.StepLR(
+            optimizer, 
+            step_size=config.lr_decay_epochs, 
+            gamma=config.lr_decay_factor
+        )
+    elif config.lr_schedule == "cosine":
+        return optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=config.epochs
+        )
+    return None
 
-    # Initialize wandb
-    wandb.init(
-        project="spaceship-detection",
-        config={
-            "architecture": "SpaceshipDetector6",
-            "learning_rate": 1e-3,
-            "epochs": NUM_EPOCHS,
-            "batch_size": BATCH_SIZE,
-            "steps_per_epoch": STEPS_PER_EPOCH,
-            "base_filters": 16,
-            "val_samples": VAL_SAMPLES
-        }
-    )
-    wandb.config.update({"total_parameters": total_params})
-    # wandb.log(model)
-    loss_fn = OrientationLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    
-    # Watch the model in wandb
-    wandb.watch(model)
-
-    for epoch in range(NUM_EPOCHS):
-        model.train()
-        running_loss = 0.0
-
-        for step in range(STEPS_PER_EPOCH):
-            imgs, labels = make_batch(BATCH_SIZE)  # now returns (batch, 6) labels
-            imgs, labels = imgs.to(device), labels.to(device)
-
-            optimizer.zero_grad()
-            preds = model(imgs)
-            
-            # Compute your orientation-aware loss
-            loss = loss_fn(preds, labels)
-            loss.backward()
-            optimizer.step()
-            
-            running_loss += loss.item()
-
-        avg_train_loss = running_loss / STEPS_PER_EPOCH
+def train_model(config=None):
+    with wandb.init(project= 'spaceship-detection', tags = ['lr_scheduler=step'],config=config) as run:
+        config = wandb.config
         
-        # ---------------------------------------------------------
-        # Evaluate IoU on a small validation set
-        # ---------------------------------------------------------
-        model.eval()
-        iou_scores = []
-        with torch.no_grad():
-            for i in range(VAL_SAMPLES):
-                img, label = make_data(has_spaceship=True)
-                # Convert label => sin/cos format if needed
-                if not np.any(np.isnan(label)):
-                    x, y, yaw, w, h = label
-                    label = np.array([x, y, np.sin(yaw), np.cos(yaw), w, h])
-                # shape => (1, 1, 200, 200)
-                img_t = torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0).to(device)
-                label_t = torch.from_numpy(label).float().unsqueeze(0).to(device)
-
-                pred_6 = model(img_t)  # (1,6)
-                pred_6 = pred_6.squeeze(0).cpu().numpy()  # [x, y, sin_yaw, cos_yaw, w, h]
-
-                # convert predicted [x, y, sin, cos, w, h] => [x, y, yaw, w, h]
-                pred_5 = convert_pred_sin_cos_to_xywhr(pred_6)
+        # Model initialization
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = SpaceshipDetector6(image_size=200, base_filters=config.base_filters)
+        model.to(device)
+        
+        # Optimizer and scheduler setup
+        optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+        scheduler = get_lr_scheduler(optimizer, config)
+        loss_fn = OrientationLoss()
+        
+        wandb.watch(model)
+        
+        for epoch in range(config.epochs):
+            model.train()
+            running_loss = 0.0
+            
+            for step in range(config.steps_per_epoch):
+                imgs, labels = make_batch(config.batch_size)
+                imgs, labels = imgs.to(device), labels.to(device)
                 
-                # same for label
-                # print(i)
-                label_5 = convert_pred_sin_cos_to_xywhr(label)
+                optimizer.zero_grad()
+                preds = model(imgs)
+                loss = loss_fn(preds, labels)
+                loss.backward()
+                optimizer.step()
+                
+                running_loss += loss.item()
+            
+            if scheduler:
+                scheduler.step()
+                current_lr = scheduler.get_last_lr()[0]
+            else:
+                current_lr = config.learning_rate
+                
+            # Validation code
+            model.eval()
+            iou_scores = []
+            with torch.no_grad():
+                for i in range(config.val_samples):
+                    img, label = make_data(has_spaceship=True)
+                    # Convert label => sin/cos format if needed
+                    if not np.any(np.isnan(label)):
+                        x, y, yaw, w, h = label
+                        label = np.array([x, y, np.sin(yaw), np.cos(yaw), w, h])
+                    # shape => (1, 1, 200, 200)
+                    img_t = torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0).to(device)
+                    label_t = torch.from_numpy(label).float().unsqueeze(0).to(device)
 
-                iou_val = score_iou(pred_5, label_5)
-                if iou_val is not None:
-                    iou_scores.append(iou_val)
+                    pred_6 = model(img_t)  # (1,6)
+                    pred_6 = pred_6.squeeze(0).cpu().numpy()  # [x, y, sin_yaw, cos_yaw, w, h]
 
-        mean_iou = np.mean(iou_scores) if len(iou_scores) > 0 else float('nan')
+                    # convert predicted [x, y, sin, cos, w, h] => [x, y, yaw, w, h]
+                    pred_5 = convert_pred_sin_cos_to_xywhr(pred_6)
+                    
+                    # same for label
+                    # print(i)
+                    label_5 = convert_pred_sin_cos_to_xywhr(label)
 
-        # Log metrics to wandb
-        wandb.log({
-            "epoch": epoch + 1,
-            "train_loss": avg_train_loss,
-            "val_iou": mean_iou,
-        })
-
-        print(f"[Epoch {epoch+1}/{NUM_EPOCHS}] "
-            f"Train Loss: {avg_train_loss:.4f} | Val IoU: {mean_iou:.4f}")
+                    iou_val = score_iou(pred_5, label_5)
+                    if iou_val is not None:
+                        iou_scores.append(iou_val)
+            
+            mean_iou = np.mean(iou_scores) if len(iou_scores) > 0 else float('nan')
+            
+            # Log metrics
+            wandb.log({
+                "epoch": epoch + 1,
+                "train_loss": running_loss / config.steps_per_epoch,
+                "val_iou": mean_iou,
+                "learning_rate": current_lr
+            })
+            
+            print(f"[Epoch {epoch+1}/{config.epochs}] "
+                  f"LR: {current_lr:.6f} | "
+                  f"Loss: {running_loss/config.steps_per_epoch:.4f} | "
+                  f"IoU: {mean_iou:.4f}")
         
-    # Save model both locally and to wandb
-    torch.save(model.state_dict(), "model_yaw.pt")
-    wandb.save("model_yaw.pt")
-    print("Training complete. Model saved to model_yaw.pt")
+        # Save model with run ID in filename
+        model_path = f"model_yaw_{run.id}.pt"
+        # torch.save(model.state_dict(), model_path)
+        # wandb.save(model_path)
+
+def main():
+    default_config = {
+        "epochs": 30,
+        "batch_size": 64,
+        "learning_rate": 1e-3,
+        "base_filters": 16,
+        "steps_per_epoch": 500,
+        "val_samples": 100,
+        "lr_schedule": "step",
+        "lr_decay_epochs": 15,
+        "lr_decay_factor": 0.1
+    }
     
-    # Close wandb run
-    wandb.finish()
+    if len(sys.argv) > 1 and sys.argv[1] == "sweep":
+        wandb.agent(sys.argv[2], train_model)
+    else:
+        train_model(default_config)
 
 if __name__ == "__main__":
     main()

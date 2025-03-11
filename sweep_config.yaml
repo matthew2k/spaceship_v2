@@ -1,0 +1,20 @@
+program: train_yaw.py
+method: random
+metric:
+  name: val_iou
+  goal: maximize
+parameters:
+  learning_rate:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.01
+  base_filters:
+    values: [8, 16, 32]
+  batch_size:
+    values: [32, 64, 128]
+  lr_schedule:
+    values: ["none", "step", "cosine"]
+  lr_decay_epochs:
+    values: [10, 15, 20]
+  lr_decay_factor:
+    values: [0.1, 0.5]

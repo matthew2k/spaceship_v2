@@ -1,8 +1,9 @@
-import wandb
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import wandb
+from torch.nn import functional as F
 
 from helpers import make_data, score_iou
 
@@ -55,14 +56,20 @@ class OrientationLoss(nn.Module):
         self.mse = nn.MSELoss()
 
     def forward(self, y_pred, y_true):
+        # Ensure inputs are 2D tensors
+        # print(type(y_pred))
+        y_pred = y_pred.view(-1, 6)
+        y_true = y_true.view(-1, 6)
+        
         # position (x, y)
-        pos_loss = self.mse(y_pred[:, 0:2], y_true[:, 0:2])
+        pos_loss = F.smooth_l1_loss(y_pred[:, 0:2], y_true[:, 0:2])
+        size_loss = F.smooth_l1_loss(y_pred[:, 4:6], y_true[:, 4:6])
         
         # orientation (sin_yaw, cos_yaw)
         ori_loss = self.mse(y_pred[:, 2:4], y_true[:, 2:4])
         
         # size (width, height)
-        size_loss = self.mse(y_pred[:, 4:6], y_true[:, 4:6])
+        
         
         total_loss = pos_loss + ori_loss + size_loss
         return total_loss
@@ -102,45 +109,50 @@ def convert_pred_sin_cos_to_xywhr(pred_params):
 
 def main():
     # Initialize wandb
+    # wandb.init(mode="disabled")
     wandb.init(
+        mode='online',
         project="spaceship-detection",
+        name="base-model",
+        tags=['mse_loss'],
         config={
-            "architecture": "SpaceshipDetector6",
-            "learning_rate": 1e-3,
             "epochs": 30,
             "batch_size": 64,
+            "learning_rate": 1e-3,
+            "base_filters": 8,
             "steps_per_epoch": 500,
-            "base_filters": 16
+            "val_samples": 100
         }
     )
     
-    NUM_EPOCHS = 30
-    BATCH_SIZE = 64
-    STEPS_PER_EPOCH = 500
-    VAL_SAMPLES = 100
+    NUM_EPOCHS = wandb.config.epochs
+    BATCH_SIZE = wandb.config.batch_size
+    STEPS_PER_EPOCH = wandb.config.steps_per_epoch
+    VAL_SAMPLES = wandb.config.val_samples
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SpaceshipDetector6(image_size=200, base_filters=16)
+    model = SpaceshipDetector6(image_size=200, base_filters=wandb.config.base_filters)
     model.to(device)
-    total_params = sum(p.numel() for p in model.parameters())
-    print("Total parameters:", total_params)
-    wandb.config.update({"total_parameters": total_params})
+    
+    # Log model graph and gradients
+    wandb.watch(model)
 
     loss_fn = OrientationLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    
-    # Watch the model in wandb
-    wandb.watch(model)
+    optimizer = optim.Adam(model.parameters(), lr=wandb.config.learning_rate)
+
 
     for epoch in range(NUM_EPOCHS):
         model.train()
         running_loss = 0.0
 
         for step in range(STEPS_PER_EPOCH):
-            imgs, labels = make_batch(BATCH_SIZE)
+            imgs, labels = make_batch(BATCH_SIZE)  # now returns (batch, 6) labels
             imgs, labels = imgs.to(device), labels.to(device)
 
             optimizer.zero_grad()
             preds = model(imgs)
+            
+            # Compute your orientation-aware loss
             loss = loss_fn(preds, labels)
             loss.backward()
             optimizer.step()
@@ -149,9 +161,11 @@ def main():
 
         avg_train_loss = running_loss / STEPS_PER_EPOCH
         
-        # Validation
+        # Validation code
         model.eval()
         iou_scores = []
+        validation_losses = []
+        
         with torch.no_grad():
             for i in range(VAL_SAMPLES):
                 img, label = make_data(has_spaceship=True)
@@ -164,7 +178,12 @@ def main():
                 label_t = torch.from_numpy(label).float().unsqueeze(0).to(device)
 
                 pred_6 = model(img_t)  # (1,6)
+
+                validation_losses.append(loss_fn(pred_6, label_t).item())
                 pred_6 = pred_6.squeeze(0).cpu().numpy()  # [x, y, sin_yaw, cos_yaw, w, h]
+
+                # pred_6 = pred_6.squeeze(0).cpu().numpy() 
+                #REPLACE # [x, y, sin_yaw, cos_yaw, w, h]
 
                 # convert predicted [x, y, sin, cos, w, h] => [x, y, yaw, w, h]
                 pred_5 = convert_pred_sin_cos_to_xywhr(pred_6)
@@ -174,28 +193,36 @@ def main():
                 label_5 = convert_pred_sin_cos_to_xywhr(label)
 
                 iou_val = score_iou(pred_5, label_5)
+                
                 if iou_val is not None:
                     iou_scores.append(iou_val)
 
         mean_iou = np.mean(iou_scores) if len(iou_scores) > 0 else float('nan')
+        mean_val_loss = np.mean(validation_losses)
 
         # Log metrics to wandb
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
+            "val_loss": mean_val_loss,
             "val_iou": mean_iou,
+            "learning_rate": optimizer.param_groups[0]['lr']
         })
 
         print(f"[Epoch {epoch+1}/{NUM_EPOCHS}] "
-              f"Train Loss: {avg_train_loss:.4f} | Val IoU: {mean_iou:.4f}")
+            f"Train Loss: {avg_train_loss:.4f} | Val Loss: {mean_val_loss:.4f} | Val IoU: {mean_iou:.4f}")
         
-    # Save model both locally and to wandb
-    torch.save(model.state_dict(), "model_yaw.pt")
-    wandb.save("model_yaw.pt")
-    print("Training complete. Model saved to model_yaw.pt")
+    # Save model
+    # model_artifact = wandb.Artifact(
+    #     "spaceship_detector", type="model",
+    #     description="Spaceship detection model with yaw prediction"
+    # )
+    torch.save(model.state_dict(), "model_yaw_l1_loss.pt")
+    # model_artifact.add_file("model_yaw.pt")
+    # wandb.log_artifact(model_artifact)
     
-    # Close wandb run
     wandb.finish()
+    print("Training complete. Model saved to model_yaw.pt")
 
 if __name__ == "__main__":
     main()
